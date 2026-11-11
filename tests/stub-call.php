@@ -303,6 +303,333 @@ if ($command === 'reject-unauthorized') {
     exit(0);
 }
 
+if ($command === 'reject-forbidden') {
+    $response = release_as('wpbr-nocap:stub-only-not-a-secret', '');
+    if ($response['status'] !== 403 || ($response['json']['code'] ?? '') !== 'forbidden') {
+        fwrite(STDERR, "nocap create was HTTP {$response['status']}\n");
+        exit(1);
+    }
+    echo "forbidden without manage_wpbr_releases\n";
+    exit(0);
+}
+
+if ($command === 'pack-plugin') {
+    $slug = require_arg(2);
+    $version = require_arg(3);
+    $out = require_arg(4);
+    $marker = isset($argv[5]) ? (string) $argv[5] : '';
+    if (preg_match('/^[a-z0-9]+(?:-[a-z0-9]+)*$/', $slug) !== 1 || preg_match('/^[0-9]+\.[0-9]+\.[0-9]+$/', $version) !== 1) {
+        fwrite(STDERR, "pack-plugin slug or version is invalid\n");
+        exit(1);
+    }
+    if (strpbrk($marker, "\r\n") !== false) {
+        fwrite(STDERR, "pack-plugin marker is invalid\n");
+        exit(1);
+    }
+    $php = "<?php\n/**\n * Plugin Name: Rollback Fixture\n * Version: {$version}\n * Requires at least: 6.5\n * Requires PHP: 7.4\n */\n";
+    if ($marker !== '') {
+        $php .= '/* ' . $marker . " */\n";
+    }
+    $dir = dirname($out);
+    if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+        fwrite(STDERR, "could not create the zip directory\n");
+        exit(1);
+    }
+    $zip = new ZipArchive();
+    if ($zip->open($out, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        fwrite(STDERR, "could not create the zip\n");
+        exit(1);
+    }
+    $zip->addFromString($slug . '/' . $slug . '.php', $php);
+    $zip->close();
+    echo $out, "\n";
+    exit(0);
+}
+
+if ($command === 'upload') {
+    $slug = require_arg(2);
+    $version = require_arg(3);
+    $zip = require_arg(4);
+    $sha = hash_file('sha256', $zip);
+    if (!is_string($sha)) {
+        fwrite(STDERR, "could not hash the zip\n");
+        exit(1);
+    }
+    $meta = json_encode([
+        'product_slug' => $slug,
+        'version' => $version,
+        'changelog' => 'Release ' . $version . '.',
+        'requires_wp' => '6.5',
+        'requires_php' => '7.4',
+        'tested_wp' => '6.7',
+        'sha256' => $sha,
+    ], JSON_UNESCAPED_SLASHES);
+    $response = post_release((string) $meta, $zip, $slug . '-' . $version . '.zip');
+    if ($response['status'] !== 200 || !is_array($response['json']) || !isset($response['json']['id'])) {
+        $code = is_array($response['json']) && isset($response['json']['code']) ? (string) $response['json']['code'] : '';
+        fwrite(STDERR, "upload HTTP {$response['status']}" . ($code !== '' ? " code={$code}" : '') . "\n");
+        exit(1);
+    }
+    echo $response['json']['id'], "\n";
+    exit(0);
+}
+
+if ($command === 'publish') {
+    $id = require_arg(2);
+    if (preg_match('/^[1-9][0-9]*$/', $id) !== 1) {
+        fwrite(STDERR, "publish id is invalid\n");
+        exit(1);
+    }
+    $published = request('POST', '/wp-json/wpbr-license/v1/releases/' . $id . '/publish', '', true);
+    $payload = json_decode($published['body'], true);
+    if ($published['status'] !== 200 || !is_array($payload) || ($payload['status'] ?? '') !== 'published') {
+        fwrite(STDERR, "publish stand-in failed\n");
+        exit(1);
+    }
+    if (!header_has($published['headers'], 'X-WPBR-Test-Only: publish-stand-in')) {
+        fwrite(STDERR, "publish stand-in was not labeled test-only\n");
+        exit(1);
+    }
+    echo "published id={$id}\n";
+    exit(0);
+}
+
+if ($command === 'id-of') {
+    $release = find_release(require_arg(2), require_arg(3));
+    echo $release['id'], "\n";
+    exit(0);
+}
+
+if ($command === 'status-of') {
+    $release = find_release(require_arg(2), require_arg(3));
+    echo $release['status'], "\n";
+    exit(0);
+}
+
+if ($command === 'expect-count') {
+    $want = (int) require_arg(2);
+    $got = count(read_state()['releases']);
+    if ($got !== $want) {
+        fwrite(STDERR, "release count is {$got}, expected {$want}\n");
+        exit(1);
+    }
+    echo "release count={$got}\n";
+    exit(0);
+}
+
+if ($command === 'expect-tombstone') {
+    $key = require_arg(2) . "\t" . require_arg(3);
+    $state = read_state();
+    if (!isset($state['versions']) || !is_array($state['versions']) || !in_array($key, $state['versions'], true)) {
+        fwrite(STDERR, "version was not tombstoned\n");
+        exit(1);
+    }
+    echo "tombstoned\n";
+    exit(0);
+}
+
+if ($command === 'drop-release') {
+    $state = read_state();
+    $state['releases'] = [];
+    write_state($state);
+    echo "dropped release rows\n";
+    exit(0);
+}
+
+if ($command === 'set-license') {
+    $status = require_arg(2);
+    if (!in_array($status, ['active', 'revoked', 'expired'], true)) {
+        fwrite(STDERR, "bad license status\n");
+        exit(1);
+    }
+    $pin = null;
+    if (isset($argv[3]) && $argv[3] !== '') {
+        $pin = (string) $argv[3];
+    }
+    $state = read_state();
+    $state['licenses'] = [
+        '0123456789abcdef0123456789abcdef' => [
+            'status' => $status,
+            'pinned_version' => $pin,
+            'expires_at' => $status === 'expired' ? '2020-01-01T00:00:00Z' : null,
+            'sites_used' => 1,
+            'sites_limit' => 0,
+        ],
+    ];
+    write_state($state);
+    echo "license {$status}\n";
+    exit(0);
+}
+
+if ($command === 'expect-update') {
+    $slug = require_arg(2);
+    $version = require_arg(3);
+    $expect = json_decode(require_arg(4), true);
+    if (!is_array($expect)) {
+        fwrite(STDERR, "expected update JSON is invalid\n");
+        exit(1);
+    }
+    $info = post_json('/wp-json/wpbr-license/v1/update-info', update_body($slug, $version));
+    if ($info['status'] !== 200 || !is_array($info['json'])) {
+        fwrite(STDERR, "update-info HTTP {$info['status']} {$info['body']}\n");
+        exit(1);
+    }
+    $json = $info['json'];
+    foreach ($expect as $key => $value) {
+        if (!is_string($key)) {
+            fwrite(STDERR, "expected update key is invalid\n");
+            exit(1);
+        }
+        if ($key === 'license') {
+            if (!is_array($value) || !isset($json['license']) || !is_array($json['license'])) {
+                fwrite(STDERR, "license summary missing\n");
+                exit(1);
+            }
+            foreach ($value as $licenseKey => $licenseValue) {
+                if (!is_string($licenseKey) || ($json['license'][$licenseKey] ?? null) !== $licenseValue) {
+                    fwrite(STDERR, "license {$licenseKey} mismatch\n");
+                    exit(1);
+                }
+            }
+            continue;
+        }
+        if (!array_key_exists($key, $json) || $json[$key] !== $value) {
+            fwrite(STDERR, "update-info {$key} mismatch\n{$info['body']}\n");
+            exit(1);
+        }
+    }
+    if (($json['update_available'] ?? null) === false) {
+        foreach (['package', 'sha256', 'allow_downgrade'] as $banned) {
+            if (array_key_exists($banned, $json)) {
+                fwrite(STDERR, "update-info included {$banned} without an offer\n");
+                exit(1);
+            }
+        }
+        echo "update-info update_available=false\n";
+        exit(0);
+    }
+    if (($json['update_available'] ?? null) !== true) {
+        fwrite(STDERR, "update_available missing\n");
+        exit(1);
+    }
+    $package = $json['package'] ?? '';
+    if (!is_string($package) || preg_match('#/wpbr-download/([1-9][0-9]*)\?exp=[1-9][0-9]*&dom=[a-z0-9.-]+&sig=[a-f0-9]{64}$#', $package, $match) !== 1) {
+        fwrite(STDERR, "package URL is not a signed download\n");
+        exit(1);
+    }
+    $offeredVersion = $json['version'] ?? '';
+    $found = null;
+    foreach (read_state()['releases'] as $release) {
+        if (!is_array($release)) {
+            continue;
+        }
+        if (($release['product_slug'] ?? '') === $slug && ($release['version'] ?? '') === $offeredVersion && ($release['status'] ?? '') === 'published') {
+            $found = $release;
+        }
+        if (($release['product_slug'] ?? '') === $slug && ($release['status'] ?? '') === 'yanked' && (string) ($release['id'] ?? '') === $match[1]) {
+            fwrite(STDERR, "yanked release was offered\n");
+            exit(1);
+        }
+    }
+    if ($found === null || (string) $found['id'] !== $match[1] || ($json['sha256'] ?? '') !== $found['sha256']) {
+        fwrite(STDERR, "offered package is not the published release\n");
+        exit(1);
+    }
+    $path = parse_url($package, PHP_URL_PATH);
+    $query = parse_url($package, PHP_URL_QUERY);
+    if (!is_string($path) || !is_string($query)) {
+        fwrite(STDERR, "package URL could not be parsed\n");
+        exit(1);
+    }
+    $download = request('GET', $path . '?' . $query, '', false);
+    if ($download['status'] !== 200 || hash('sha256', $download['body']) !== $found['sha256']) {
+        fwrite(STDERR, "downloaded zip did not match the offered release\n");
+        exit(1);
+    }
+    $allow = ($json['allow_downgrade'] ?? false) === true ? 'true' : 'false';
+    echo "update-info version={$offeredVersion} allow_downgrade={$allow}\n";
+    exit(0);
+}
+
+if ($command === 'expect-expired') {
+    $info = post_json('/wp-json/wpbr-license/v1/update-info', update_body(require_arg(2), require_arg(3)));
+    if ($info['status'] !== 403 || !is_array($info['json']) || ($info['json']['code'] ?? '') !== 'license_expired') {
+        fwrite(STDERR, "expired license was HTTP {$info['status']}\n");
+        exit(1);
+    }
+    if (strpos($info['body'], 'package') !== false) {
+        fwrite(STDERR, "expired response included a package\n");
+        exit(1);
+    }
+    echo "license_expired\n";
+    exit(0);
+}
+
+if ($command === 'expect-info') {
+    $version = require_arg(3);
+    $public = get_json('/wp-json/wpbr-license/v1/info/' . require_arg(2));
+    $want = $version === 'null' ? null : $version;
+    $got = is_array($public['json']) && array_key_exists('version', $public['json']) ? $public['json']['version'] : 'missing';
+    if ($public['status'] !== 200 || $got !== $want) {
+        fwrite(STDERR, "info version mismatch\n");
+        exit(1);
+    }
+    if (strpos($public['body'], 'package') !== false) {
+        fwrite(STDERR, "info included a package\n");
+        exit(1);
+    }
+    echo 'info version=' . ($want === null ? 'null' : $want) . "\n";
+    exit(0);
+}
+
+if ($command === 'expect-download-blocked') {
+    $id = require_arg(2);
+    $response = request('GET', '/wpbr-download/' . $id . '?exp=1893456000&dom=example.com&sig=' . str_repeat('ab', 32), '', false);
+    if ($response['status'] !== 403) {
+        fwrite(STDERR, "yanked download was HTTP {$response['status']}\n");
+        exit(1);
+    }
+    echo "download blocked\n";
+    exit(0);
+}
+
+if ($command === 'yank-auth') {
+    $mode = require_arg(2);
+    $id = require_arg(3);
+    $expectHttp = (int) require_arg(4);
+    $expectCode = require_arg(5);
+    $body = '{}';
+    if ($mode === 'empty') {
+        $body = '';
+    } elseif ($mode === 'bad-body') {
+        $body = '{"extra":true}';
+    } elseif ($mode === 'reason') {
+        $body = '{"reason":"again"}';
+    }
+    $response = yank_http($mode, $id, $body);
+    if ($response['status'] !== $expectHttp) {
+        fwrite(STDERR, "yank {$mode} was HTTP {$response['status']}\n");
+        exit(1);
+    }
+    if ($expectHttp === 200) {
+        if (!is_array($response['json']) || ($response['json']['status'] ?? '') !== 'yanked' || (int) ($response['json']['id'] ?? 0) !== (int) $id) {
+            fwrite(STDERR, "yank {$mode} body was not yanked\n");
+            exit(1);
+        }
+        $keys = array_keys($response['json']);
+        sort($keys);
+        if ($keys !== ['id', 'status']) {
+            fwrite(STDERR, "yank body has extra fields\n");
+            exit(1);
+        }
+    } elseif (!is_array($response['json']) || ($response['json']['code'] ?? '') !== $expectCode) {
+        fwrite(STDERR, "yank {$mode} code mismatch\n");
+        exit(1);
+    }
+    echo "yank {$mode} HTTP {$expectHttp}\n";
+    exit(0);
+}
+
 fwrite(STDERR, "unknown stub-call command\n");
 exit(1);
 
@@ -480,4 +807,95 @@ function request(string $method, string $path, string $body, bool $auth): array
     }
 
     return ['status' => $status, 'body' => is_string($raw) ? $raw : '', 'headers' => $headers];
+}
+
+/**
+ * @param array<string, mixed> $state
+ */
+function write_state(array $state): void
+{
+    $encoded = json_encode($state, JSON_UNESCAPED_SLASHES);
+    if (!is_string($encoded) || file_put_contents(state_path(), $encoded) === false) {
+        fwrite(STDERR, "could not write stub state\n");
+        exit(1);
+    }
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function find_release(string $slug, string $version): array
+{
+    foreach (read_state()['releases'] as $release) {
+        if (is_array($release) && ($release['product_slug'] ?? '') === $slug && ($release['version'] ?? '') === $version) {
+            return $release;
+        }
+    }
+    fwrite(STDERR, "release not found\n");
+    exit(1);
+}
+
+/**
+ * @return array{status: int, json: mixed}
+ */
+function release_as(string $userpwd, string $body): array
+{
+    global $base;
+    $ch = curl_init($base . '/wp-json/wpbr-license/v1/releases');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_USERPWD, $userpwd);
+    curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json', 'Expect:']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $raw = curl_exec($ch);
+    $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return [
+        'status' => $http,
+        'json' => is_string($raw) ? json_decode($raw, true) : null,
+    ];
+}
+
+/**
+ * @return array{status: int, json: mixed}
+ */
+function yank_http(string $mode, string $id, string $body): array
+{
+    global $base;
+    $ch = curl_init($base . '/wp-json/wpbr-license/v1/releases/' . $id . '/yank');
+    $headers = ['Accept: application/json', 'Expect:'];
+    if ($body !== '') {
+        $headers[] = 'Content-Type: application/json';
+    }
+    $userpwd = null;
+    if ($mode === 'bearer') {
+        $headers[] = 'Authorization: Bearer 0123456789abcdef0123456789abcdef';
+    } elseif ($mode === 'nocap') {
+        $userpwd = 'wpbr-nocap:stub-only-not-a-secret';
+    } elseif ($mode === 'customer-password') {
+        $userpwd = 'wpbr-release:0123456789abcdef0123456789abcdef';
+    } elseif ($mode === 'ok' || $mode === 'bad-body' || $mode === 'empty' || $mode === 'reason') {
+        $userpwd = 'wpbr-release:stub-only-not-a-secret';
+    } elseif ($mode !== 'none') {
+        fwrite(STDERR, "unknown yank auth mode\n");
+        exit(1);
+    }
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    if ($userpwd !== null) {
+        curl_setopt($ch, CURLOPT_USERPWD, $userpwd);
+        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+    }
+    $raw = curl_exec($ch);
+    $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return [
+        'status' => $http,
+        'json' => is_string($raw) ? json_decode($raw, true) : null,
+    ];
 }

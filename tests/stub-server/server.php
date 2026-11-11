@@ -1,12 +1,21 @@
 <?php
 
 /**
- * Local stand-in for wpbr-license/v1 /releases and /update-info.
+ * Local stand-in for wpbr-license/v1 /releases, /releases/{id}/yank, and /update-info.
  *
  * Speaks the da084ce JSON schemas under schema/. POST /releases is multipart
  * parts `metadata` (application/json) and `zip` only. A create returns HTTP 200
- * and status draft. A product version that was accepted once returns 409 forever.
- * Drafts are not offered by update-info.
+ * and status draft. A product_slug+version that was accepted once is tombstoned:
+ * a later upload is 409 invalid_request, including after a yank, after the row
+ * is removed, and when the sha256 is identical. Drafts and yanked releases are
+ * never offered. Yanking the latest published release offers the previous
+ * published one. allow_downgrade is true only when that offer is older than
+ * the client.
+ *
+ * POST /releases/{id}/yank is the real route: numeric id, Basic auth with
+ * manage_wpbr_releases, body empty or {} or {"reason":"..."}. Customer tokens
+ * are 401. A draft yank is 409. An unknown id is release_not_found. Repeating
+ * a yank is 200.
  *
  * TEST ONLY: POST /releases/{id}/publish stands in for the WPBR releases screen
  * (an admin POST with a nonce). It is not a REST route on the real server.
@@ -24,6 +33,7 @@ if (PHP_SAPI !== 'cli-server' && PHP_SAPI !== 'cli') {
 }
 
 const WPBR_STUB_USER = 'wpbr-release';
+const WPBR_STUB_NOCAP_USER = 'wpbr-nocap';
 const WPBR_STUB_PASSWORD = 'stub-only-not-a-secret';
 const WPBR_STUB_TOKEN = '0123456789abcdef0123456789abcdef';
 const WPBR_STUB_HMAC = 'stub-download-secret';
@@ -53,6 +63,8 @@ function handle_request(): void
     } elseif ($method === 'POST' && preg_match('#^/wp-json/wpbr-license/v1/releases/([1-9][0-9]*)/publish$#', $path, $match) === 1) {
         $testOnlyPublish = true;
         [$status, $body] = publish_release($state, (int) $match[1]);
+    } elseif ($method === 'POST' && preg_match('#^/wp-json/wpbr-license/v1/releases/([1-9][0-9]*)/yank$#', $path, $match) === 1) {
+        [$status, $body] = yank_release($state, (int) $match[1]);
     } elseif ($method === 'POST' && $path === '/wp-json/wpbr-license/v1/update-info') {
         [$status, $body] = update_info($state);
     } elseif ($method === 'GET' && preg_match('#^/wp-json/wpbr-license/v1/info/([a-z0-9]+(?:-[a-z0-9]+)*)$#', $path, $match) === 1) {
@@ -114,8 +126,9 @@ function handle_request(): void
  */
 function create_release(array &$state): array
 {
-    if (!authorized()) {
-        return [401, error_body(401, 'unauthorized', 'Unauthorized.')];
+    $authError = release_auth_error();
+    if ($authError !== null) {
+        return $authError;
     }
     $shape = multipart_shape_error();
     if ($shape !== null) {
@@ -203,8 +216,9 @@ function create_release(array &$state): array
  */
 function publish_release(array &$state, int $id): array
 {
-    if (!authorized()) {
-        return [401, error_body(401, 'unauthorized', 'Unauthorized.')];
+    $authError = release_auth_error();
+    if ($authError !== null) {
+        return $authError;
     }
     foreach ($state['releases'] as $index => $release) {
         if ((int) $release['id'] !== $id) {
@@ -219,6 +233,76 @@ function publish_release(array &$state, int $id): array
 }
 
 /**
+ * POST /releases/{id}/yank. Idempotent for an already-yanked release.
+ * A draft is 409 invalid_request. The version stays tombstoned.
+ *
+ * @param array<string, mixed> $state
+ * @return array{0: int, 1: string}
+ */
+function yank_release(array &$state, int $id): array
+{
+    $authError = release_auth_error();
+    if ($authError !== null) {
+        return $authError;
+    }
+    $parsed = yank_body();
+    if ($parsed === null) {
+        return [400, error_body(400, 'invalid_request', 'Yank body must be empty, {}, or {"reason":"..."}.')];
+    }
+    foreach ($state['releases'] as $index => $release) {
+        if ((int) $release['id'] !== $id) {
+            continue;
+        }
+        if ($release['status'] === 'draft') {
+            return [409, error_body(409, 'invalid_request', 'Publish or delete this draft. Yank applies to a published release.')];
+        }
+        $state['releases'][$index]['status'] = 'yanked';
+        $encoded = json_encode([
+            'id' => $id,
+            'status' => 'yanked',
+        ], JSON_UNESCAPED_SLASHES);
+
+        return [200, is_string($encoded) ? $encoded : ''];
+    }
+
+    return [404, error_body(404, 'release_not_found', 'Release not found.')];
+}
+
+/**
+ * Empty, {}, or {"reason":"..."}. Anything else is rejected.
+ */
+function yank_body(): ?array
+{
+    $raw = file_get_contents('php://input');
+    if (!is_string($raw)) {
+        return null;
+    }
+    $raw = trim($raw);
+    if ($raw === '' || $raw === '{}') {
+        return [];
+    }
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+    $keys = [];
+    foreach (array_keys($decoded) as $key) {
+        if (!is_string($key)) {
+            return null;
+        }
+        $keys[] = $key;
+    }
+    if ($keys === []) {
+        return [];
+    }
+    if ($keys !== ['reason'] || !isset($decoded['reason']) || !is_string($decoded['reason'])) {
+        return null;
+    }
+
+    return ['reason' => $decoded['reason']];
+}
+
+/**
  * @param array<string, mixed> $state
  * @return array{0: int, 1: string}
  */
@@ -229,13 +313,28 @@ function update_info(array $state): array
     if (!is_array($body)) {
         return [400, error_body(400, 'invalid_request', 'Invalid request.')];
     }
-    foreach (['instance_token', 'domain', 'product_slug', 'version'] as $field) {
+    $allowed = ['instance_token', 'domain', 'product_slug', 'version'];
+    foreach (array_keys($body) as $key) {
+        if (!is_string($key) || !in_array($key, $allowed, true)) {
+            return [400, error_body(400, 'invalid_request', 'Invalid request.')];
+        }
+    }
+    foreach ($allowed as $field) {
         if (!isset($body[$field]) || !is_string($body[$field])) {
             return [400, error_body(400, 'invalid_request', 'Invalid request.')];
         }
     }
-    $token = $body['instance_token'];
-    if (strlen($token) !== strlen(WPBR_STUB_TOKEN) || !hash_equals(WPBR_STUB_TOKEN, $token)) {
+    if (preg_match('/^[A-Za-z0-9_-]{32,255}$/', $body['instance_token']) !== 1) {
+        return [401, error_body(401, 'invalid_token', 'Invalid token.')];
+    }
+    if (preg_match('/^[a-z0-9]+(?:-[a-z0-9]+)*$/', $body['product_slug']) !== 1) {
+        return [400, error_body(400, 'invalid_request', 'Invalid request.')];
+    }
+    if (preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/', $body['version']) !== 1) {
+        return [400, error_body(400, 'invalid_request', 'Invalid request.')];
+    }
+    $license = license_record($state, $body['instance_token']);
+    if ($license === null) {
         return [401, error_body(401, 'invalid_token', 'Invalid token.')];
     }
     $domain = normalize_domain($body['domain']);
@@ -243,25 +342,33 @@ function update_info(array $state): array
         return [400, error_body(400, 'invalid_request', 'Invalid domain.')];
     }
 
-    $offered = latest_published($state, $body['product_slug']);
-    $license = [
-        'status' => 'active',
-        'expires_at' => null,
-        'sites_used' => 1,
-        'sites_limit' => 0,
+    $effective = effective_status($license);
+    if ($effective === 'expired') {
+        return [403, error_body(403, 'license_expired', 'License expired.')];
+    }
+    $summary = [
+        'status' => $effective,
+        'expires_at' => $license['expires_at'],
+        'sites_used' => $license['sites_used'],
+        'sites_limit' => $license['sites_limit'],
     ];
+    $offered = null;
+    if ($effective === 'active') {
+        $offered = select_offer($state, $body['product_slug'], $license['pinned_version']);
+    }
     if ($offered === null || version_compare($body['version'], (string) $offered['version'], 'eq')) {
-        return [200, json_encode([
+        $encoded = json_encode([
             'update_available' => false,
-            'license' => $license,
-        ], JSON_UNESCAPED_SLASHES)];
+            'license' => $summary,
+        ], JSON_UNESCAPED_SLASHES);
+
+        return [200, is_string($encoded) ? $encoded : ''];
     }
 
     $exp = time() + 900;
     $sig = hash_hmac('sha256', $offered['id'] . '|' . $domain . '|' . $exp, hmac_secret());
     $package = public_base() . '/wpbr-download/' . $offered['id'] . '?exp=' . $exp . '&dom=' . $domain . '&sig=' . $sig;
-
-    return [200, json_encode([
+    $encoded = json_encode([
         'update_available' => true,
         'version' => $offered['version'],
         'package' => $package,
@@ -270,9 +377,11 @@ function update_info(array $state): array
         'requires_php' => $offered['requires_php'],
         'tested' => $offered['tested_wp'],
         'changelog' => $offered['changelog'],
-        'allow_downgrade' => version_compare($body['version'], (string) $offered['version'], 'gt'),
-        'license' => $license,
-    ], JSON_UNESCAPED_SLASHES)];
+        'allow_downgrade' => version_compare((string) $offered['version'], $body['version'], 'lt'),
+        'license' => $summary,
+    ], JSON_UNESCAPED_SLASHES);
+
+    return [200, is_string($encoded) ? $encoded : ''];
 }
 
 /**
@@ -477,37 +586,183 @@ function uploaded_zip(): ?string
     return $tmp;
 }
 
-function authorized(): bool
+/**
+ * @return array{0: int, 1: string}|null
+ */
+function release_auth_error(): ?array
 {
-    if (isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']) && is_string($_SERVER['PHP_AUTH_USER']) && is_string($_SERVER['PHP_AUTH_PW'])) {
-        return same_secret($_SERVER['PHP_AUTH_USER'], expected_user()) && same_secret($_SERVER['PHP_AUTH_PW'], expected_password());
+    $status = auth_status();
+    if ($status === 'ok') {
+        return null;
     }
-    $header = '';
+    if ($status === 'forbidden') {
+        return [403, error_body(403, 'forbidden', 'manage_wpbr_releases is required.')];
+    }
+
+    return [401, error_body(401, 'unauthorized', 'Unauthorized.')];
+}
+
+/**
+ * ok, forbidden (authenticated, no manage_wpbr_releases), or unauthorized.
+ * A Bearer customer token is unauthorized, not a WordPress user.
+ */
+function auth_status(): string
+{
+    $header = authorization_header();
+    if (stripos($header, 'Bearer ') === 0) {
+        return 'unauthorized';
+    }
+    $creds = basic_credentials();
+    if ($creds === null) {
+        return 'unauthorized';
+    }
+    if (same_secret($creds[0], expected_user()) && same_secret($creds[1], expected_password())) {
+        return 'ok';
+    }
+    if (same_secret($creds[0], WPBR_STUB_NOCAP_USER) && same_secret($creds[1], expected_password())) {
+        return 'forbidden';
+    }
+
+    return 'unauthorized';
+}
+
+function authorization_header(): string
+{
     if (isset($_SERVER['HTTP_AUTHORIZATION']) && is_string($_SERVER['HTTP_AUTHORIZATION'])) {
-        $header = $_SERVER['HTTP_AUTHORIZATION'];
-    } elseif (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) && is_string($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
-        $header = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
-    } elseif (function_exists('getallheaders')) {
+        return $_SERVER['HTTP_AUTHORIZATION'];
+    }
+    if (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION']) && is_string($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        return $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+    }
+    if (function_exists('getallheaders')) {
         $headers = getallheaders();
         if (is_array($headers)) {
             foreach ($headers as $name => $value) {
                 if (strcasecmp((string) $name, 'Authorization') === 0 && is_string($value)) {
-                    $header = $value;
-                    break;
+                    return $value;
                 }
             }
         }
     }
+
+    return '';
+}
+
+/**
+ * @return array{0: string, 1: string}|null
+ */
+function basic_credentials(): ?array
+{
+    if (isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']) && is_string($_SERVER['PHP_AUTH_USER']) && is_string($_SERVER['PHP_AUTH_PW'])) {
+        return [$_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']];
+    }
+    $header = authorization_header();
     if (stripos($header, 'Basic ') !== 0) {
-        return false;
+        return null;
     }
     $decoded = base64_decode(substr($header, 6), true);
     if (!is_string($decoded) || strpos($decoded, ':') === false) {
-        return false;
+        return null;
     }
     $parts = explode(':', $decoded, 2);
 
-    return same_secret($parts[0], expected_user()) && same_secret($parts[1], expected_password());
+    return [$parts[0], $parts[1]];
+}
+
+/**
+ * @param array<string, mixed> $state
+ * @return array{status: string, pinned_version: mixed, expires_at: mixed, sites_used: int, sites_limit: int}|null
+ */
+function license_record(array $state, string $token): ?array
+{
+    if (!isset($state['licenses']) || !is_array($state['licenses'])) {
+        if (strlen($token) === strlen(WPBR_STUB_TOKEN) && hash_equals(WPBR_STUB_TOKEN, $token)) {
+            return [
+                'status' => 'active',
+                'pinned_version' => null,
+                'expires_at' => null,
+                'sites_used' => 1,
+                'sites_limit' => 0,
+            ];
+        }
+
+        return null;
+    }
+    if (!isset($state['licenses'][$token]) || !is_array($state['licenses'][$token])) {
+        return null;
+    }
+    $row = $state['licenses'][$token];
+    $expires = array_key_exists('expires_at', $row) ? $row['expires_at'] : null;
+
+    return [
+        'status' => isset($row['status']) && is_string($row['status']) ? $row['status'] : 'active',
+        'pinned_version' => $row['pinned_version'] ?? null,
+        'expires_at' => $expires,
+        'sites_used' => isset($row['sites_used']) ? (int) $row['sites_used'] : 1,
+        'sites_limit' => isset($row['sites_limit']) ? (int) $row['sites_limit'] : 0,
+    ];
+}
+
+/**
+ * Revoked wins over expiry. A past expires_at is expired.
+ *
+ * @param array{status: string, pinned_version: mixed, expires_at: mixed, sites_used: int, sites_limit: int} $license
+ */
+function effective_status(array $license): string
+{
+    if ($license['status'] === 'revoked') {
+        return 'revoked';
+    }
+    if ($license['status'] === 'expired') {
+        return 'expired';
+    }
+    $expires = $license['expires_at'];
+    if (is_string($expires) && $expires !== '') {
+        $stamp = strtotime($expires);
+        if ($stamp !== false && $stamp < time()) {
+            return 'expired';
+        }
+    }
+
+    return 'active';
+}
+
+/**
+ * Newest published stable release, capped at pinned_version.
+ * An invalid pin offers nothing. Drafts and yanked releases are ignored.
+ *
+ * @param array<string, mixed> $state
+ * @return array<string, mixed>|null
+ */
+function select_offer(array $state, string $slug, $pin): ?array
+{
+    if ($pin !== null && $pin !== '') {
+        if (!is_string($pin) || preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/', $pin) !== 1) {
+            return null;
+        }
+    } else {
+        $pin = null;
+    }
+    $best = null;
+    foreach ($state['releases'] as $release) {
+        if (!is_array($release)) {
+            continue;
+        }
+        if (($release['product_slug'] ?? '') !== $slug || ($release['status'] ?? '') !== 'published') {
+            continue;
+        }
+        if (($release['channel'] ?? 'stable') !== 'stable') {
+            continue;
+        }
+        if ($pin !== null && version_compare((string) $release['version'], $pin, 'gt')) {
+            continue;
+        }
+        if ($best === null || version_compare((string) $release['version'], (string) $best['version'], 'gt')) {
+            $best = $release;
+        }
+    }
+
+    return $best;
 }
 
 function same_secret(string $left, string $right): bool

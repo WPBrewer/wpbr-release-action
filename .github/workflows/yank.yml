@@ -1,0 +1,83 @@
+name: Yank release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-id:
+        description: Numeric release id from the draft upload log (draft id=) or the WPBR releases screen.
+        required: true
+        type: string
+      reason:
+        description: Optional note stored with the yank. Customers do not see this.
+        required: false
+        type: string
+        default: ""
+      use-stub:
+        description: Self-test only. Talks to the in-repo stub and ignores the release secrets.
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      release-id:
+        description: Numeric release id from the draft upload log (draft id=) or the WPBR releases screen.
+        required: true
+        type: string
+      reason:
+        description: Optional note stored with the yank. Customers do not see this.
+        required: false
+        type: string
+        default: ""
+      use-stub:
+        description: Self-test only. Talks to the in-repo stub and ignores the release secrets.
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      WPBR_RELEASE_USER:
+        description: WordPress user that owns the application password.
+        required: false
+      WPBR_RELEASE_APP_PASSWORD:
+        description: WordPress application password with manage_wpbr_releases.
+        required: false
+      WPBR_SERVER_URL:
+        description: License server origin, no path. Example https://licenses.example.com
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  yank:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          coverage: none
+          extensions: curl, mbstring, zip
+
+      - name: Yank release
+        env:
+          RELEASE_ID: ${{ inputs.release-id }}
+          WPBR_YANK_REASON: ${{ inputs.reason }}
+          USE_STUB: ${{ inputs.use-stub }}
+          WPBR_RELEASE_USER: ${{ secrets.WPBR_RELEASE_USER }}
+          WPBR_RELEASE_APP_PASSWORD: ${{ secrets.WPBR_RELEASE_APP_PASSWORD }}
+          WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}
+        run: bash scripts/yank.sh
+
+      - name: Upload stub evidence
+        if: always() && inputs.use-stub
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stub-yank
+          path: |
+            stub-state.json
+            build/yank-result.json
+          if-no-files-found: error
