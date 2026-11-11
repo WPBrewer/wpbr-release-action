@@ -132,6 +132,10 @@ if ($command === 'publish-and-expect') {
         fwrite(STDERR, "publish stand-in failed\n");
         exit(1);
     }
+    if (!header_has($published['headers'], 'X-WPBR-Test-Only: publish-stand-in')) {
+        fwrite(STDERR, "publish stand-in was not labeled test-only\n");
+        exit(1);
+    }
     $info = post_json('/wp-json/wpbr-license/v1/update-info', update_body($slug, '1.0.0'));
     if ($info['status'] !== 200 || !is_array($info['json']) || ($info['json']['update_available'] ?? false) !== true) {
         fwrite(STDERR, "published release was not offered\n");
@@ -151,7 +155,41 @@ if ($command === 'publish-and-expect') {
         fwrite(STDERR, "downloaded zip sha256 did not match\n");
         exit(1);
     }
-    echo "published offer sha256={$sha}\n";
+    echo "test-only publish stand-in offered sha256={$sha}\n";
+    exit(0);
+}
+
+if ($command === 'expect-stored') {
+    $expect = json_decode(require_arg(2), true);
+    if (!is_array($expect)) {
+        fwrite(STDERR, "expected metadata JSON is invalid\n");
+        exit(1);
+    }
+    $release = only_release();
+    foreach ($expect as $key => $value) {
+        if (!is_string($key) || ($release[$key] ?? null) !== $value) {
+            fwrite(STDERR, "stored {$key} mismatch\n");
+            exit(1);
+        }
+    }
+    echo "stored metadata matched\n";
+    exit(0);
+}
+
+if ($command === 'expect-metadata-file') {
+    $decoded = json_decode((string) file_get_contents(require_arg(2)), true);
+    $expect = json_decode(require_arg(3), true);
+    if (!is_array($decoded) || !is_array($expect)) {
+        fwrite(STDERR, "metadata JSON is invalid\n");
+        exit(1);
+    }
+    foreach ($expect as $key => $value) {
+        if (!is_string($key) || ($decoded[$key] ?? null) !== $value) {
+            fwrite(STDERR, "metadata file {$key} mismatch\n");
+            exit(1);
+        }
+    }
+    echo "metadata file matched\n";
     exit(0);
 }
 
@@ -159,7 +197,6 @@ if ($command === 'reject-bad-sha') {
     $slug = require_arg(2);
     $before = count(read_state()['releases']);
     $zip = require_arg(3);
-    $sha = hash_file('sha256', $zip);
     $meta = json_encode([
         'product_slug' => $slug,
         'version' => '9.9.9',
@@ -169,24 +206,89 @@ if ($command === 'reject-bad-sha') {
         'tested_wp' => '6.7',
         'sha256' => str_repeat('a', 64),
     ], JSON_UNESCAPED_SLASHES);
+    $response = post_release((string) $meta, $zip, $slug . '-9.9.9.zip');
+    if ($response['status'] !== 400 || ($response['json']['code'] ?? '') !== 'invalid_request' || count(read_state()['releases']) !== $before) {
+        fwrite(STDERR, "bad sha256 was stored or not rejected (HTTP {$response['status']})\n");
+        exit(1);
+    }
+    echo "bad sha256 rejected\n";
+    exit(0);
+}
+
+if ($command === 'reject-unknown-field') {
+    $slug = require_arg(2);
+    $before = count(read_state()['releases']);
+    $zip = require_arg(3);
+    $meta = (string) json_encode([
+        'product_slug' => $slug,
+        'version' => '9.9.6',
+        'changelog' => 'unknown',
+        'requires_wp' => '6.5',
+        'requires_php' => '7.4',
+        'tested_wp' => '6.7',
+        'sha256' => hash_file('sha256', $zip),
+        'note' => 'no',
+    ], JSON_UNESCAPED_SLASHES);
+    $response = post_release($meta, $zip, $slug . '-9.9.6.zip');
+    if ($response['status'] !== 400 || ($response['json']['code'] ?? '') !== 'invalid_request' || count(read_state()['releases']) !== $before) {
+        fwrite(STDERR, "unknown metadata field was accepted (HTTP {$response['status']})\n");
+        exit(1);
+    }
+    echo "unknown metadata field rejected\n";
+    exit(0);
+}
+
+if ($command === 'reject-wrong-part') {
+    $slug = require_arg(2);
+    $before = count(read_state()['releases']);
+    $zip = require_arg(3);
+    $meta = (string) json_encode([
+        'product_slug' => $slug,
+        'version' => '9.9.8',
+        'changelog' => 'wrong part',
+        'requires_wp' => '6.5',
+        'requires_php' => '7.4',
+        'tested_wp' => '6.7',
+        'sha256' => hash_file('sha256', $zip),
+    ], JSON_UNESCAPED_SLASHES);
+    $response = post_release($meta, $zip, $slug . '-9.9.8.zip', 'file');
+    if ($response['status'] !== 400 || ($response['json']['code'] ?? '') !== 'invalid_request' || count(read_state()['releases']) !== $before) {
+        fwrite(STDERR, "part named file was accepted (HTTP {$response['status']})\n");
+        exit(1);
+    }
+    echo "part file rejected\n";
+    exit(0);
+}
+
+if ($command === 'reject-loose-fields') {
+    $slug = require_arg(2);
+    $before = count(read_state()['releases']);
+    $zip = require_arg(3);
+    $sha = hash_file('sha256', $zip);
     $ch = curl_init($base . '/wp-json/wpbr-license/v1/releases');
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_USERPWD, 'wpbr-release:stub-only-not-a-secret');
     curl_setopt($ch, CURLOPT_POSTFIELDS, [
-        'metadata' => $meta,
-        'file' => new CURLFile($zip, 'application/zip', $slug . '-9.9.9.zip'),
+        'product_slug' => $slug,
+        'version' => '9.9.7',
+        'changelog' => 'loose',
+        'requires_wp' => '6.5',
+        'requires_php' => '7.4',
+        'tested_wp' => '6.7',
+        'sha256' => $sha,
+        'zip' => new CURLFile($zip, 'application/zip', $slug . '-9.9.7.zip'),
     ]);
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json', 'Expect:']);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_exec($ch);
+    $raw = curl_exec($ch);
     $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-    if ($http !== 400 || count(read_state()['releases']) !== $before) {
-        fwrite(STDERR, "bad sha256 was stored or not rejected (HTTP {$http})\n");
+    $decoded = is_string($raw) ? json_decode($raw, true) : null;
+    if ($http !== 400 || !is_array($decoded) || ($decoded['code'] ?? '') !== 'invalid_request' || count(read_state()['releases']) !== $before) {
+        fwrite(STDERR, "loose form fields were accepted (HTTP {$http})\n");
         exit(1);
     }
-    unset($sha);
-    echo "bad sha256 rejected\n";
+    echo "loose form fields rejected\n";
     exit(0);
 }
 
@@ -289,7 +391,58 @@ function get_json(string $path): array
 }
 
 /**
- * @return array{status: int, body: string}
+ * @param list<string> $headers
+ */
+function header_has(array $headers, string $needle): bool
+{
+    foreach ($headers as $header) {
+        if (strcasecmp(trim($header), $needle) === 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @return array{status: int, json: mixed}
+ */
+function post_release(string $metadata, string $zipPath, string $filename, string $zipPart = 'zip'): array
+{
+    global $base;
+    $zipBytes = (string) file_get_contents($zipPath);
+    $boundary = 'wpbr' . bin2hex(random_bytes(8));
+    $body = "--{$boundary}\r\n"
+        . "Content-Disposition: form-data; name=\"metadata\"\r\n"
+        . "Content-Type: application/json\r\n\r\n"
+        . $metadata . "\r\n"
+        . "--{$boundary}\r\n"
+        . "Content-Disposition: form-data; name=\"{$zipPart}\"; filename=\"{$filename}\"\r\n"
+        . "Content-Type: application/zip\r\n\r\n"
+        . $zipBytes . "\r\n"
+        . "--{$boundary}--\r\n";
+    $ch = curl_init($base . '/wp-json/wpbr-license/v1/releases');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_USERPWD, 'wpbr-release:stub-only-not-a-secret');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Accept: application/json',
+        'Expect:',
+        'Content-Type: multipart/form-data; boundary=' . $boundary,
+    ]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $raw = curl_exec($ch);
+    $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return [
+        'status' => $http,
+        'json' => is_string($raw) ? json_decode($raw, true) : null,
+    ];
+}
+
+/**
+ * @return array{status: int, body: string, headers: list<string>}
  */
 function request(string $method, string $path, string $body, bool $auth): array
 {
@@ -317,5 +470,14 @@ function request(string $method, string $path, string $body, bool $auth): array
         $status = (int) $match[1];
     }
 
-    return ['status' => $status, 'body' => is_string($raw) ? $raw : ''];
+    $headers = [];
+    if (isset($http_response_header) && is_array($http_response_header)) {
+        foreach ($http_response_header as $header) {
+            if (is_string($header)) {
+                $headers[] = $header;
+            }
+        }
+    }
+
+    return ['status' => $status, 'body' => is_string($raw) ? $raw : '', 'headers' => $headers];
 }

@@ -67,22 +67,32 @@ if ($command === 'metadata') {
         fwrite(STDERR, "could not hash the zip\n");
         exit(1);
     }
-    $changelog = '';
-    $changelogPath = $source . '/CHANGELOG.md';
-    if (is_file($changelogPath)) {
-        $changelog = (string) file_get_contents($changelogPath);
-        if (strlen($changelog) > 100000) {
-            fwrite(STDERR, "CHANGELOG.md is longer than 100000 bytes\n");
-            exit(1);
-        }
-    }
+    $requiresWp = version_field(
+        optional_env('WPBR_REQUIRES_WP'),
+        $headers['requires_wp'],
+        'requires_wp',
+        'set the requires-wp input, or add plugin header "Requires at least"'
+    );
+    $requiresPhp = version_field(
+        optional_env('WPBR_REQUIRES_PHP'),
+        $headers['requires_php'],
+        'requires_php',
+        'set the requires-php input, or add plugin header "Requires PHP"'
+    );
+    $testedWp = version_field(
+        optional_env('WPBR_TESTED_WP'),
+        readme_tested_wp($source),
+        'tested_wp',
+        'set the tested-wp input, or add readme.txt "Tested up to"'
+    );
+    $changelog = changelog_for_version($source, $version, optional_env('WPBR_CHANGELOG'));
     $metadata = [
         'product_slug' => $slug,
         'version' => $version,
         'changelog' => $changelog,
-        'requires_wp' => $headers['requires_wp'],
-        'requires_php' => $headers['requires_php'],
-        'tested_wp' => $headers['tested_wp'],
+        'requires_wp' => $requiresWp,
+        'requires_php' => $requiresPhp,
+        'tested_wp' => $testedWp,
         'sha256' => $sha,
     ];
     $encoded = json_encode($metadata, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -140,7 +150,7 @@ function require_arg(array $args, string $key): string
 }
 
 /**
- * @return array{version: string, requires_wp: string, requires_php: string, tested_wp: string}
+ * @return array{version: string, requires_wp: ?string, requires_php: ?string}
  */
 function read_headers(string $source, string $slug): array
 {
@@ -157,29 +167,182 @@ function read_headers(string $source, string $slug): array
     $text = (string) fread($handle, 8192);
     fclose($handle);
 
-    $headers = [
-        'version' => header_value($text, 'Version'),
-        'requires_wp' => header_value($text, 'Requires at least'),
-        'requires_php' => header_value($text, 'Requires PHP'),
-        'tested_wp' => header_value($text, 'Tested up to'),
-    ];
-    foreach ($headers as $name => $value) {
-        if ($value === null || $value === '') {
-            fwrite(STDERR, "plugin header missing: {$name}\n");
-            exit(1);
-        }
-        if (preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/', $value) !== 1) {
-            fwrite(STDERR, "plugin header {$name} is not a version: {$value}\n");
-            exit(1);
-        }
+    $version = header_value($text, 'Version');
+    if ($version === null || $version === '') {
+        fwrite(STDERR, "plugin header missing: version\n");
+        exit(1);
+    }
+    if (preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/', $version) !== 1) {
+        fwrite(STDERR, "plugin header version is not a version: {$version}\n");
+        exit(1);
     }
 
     return [
-        'version' => $headers['version'],
-        'requires_wp' => $headers['requires_wp'],
-        'requires_php' => $headers['requires_php'],
-        'tested_wp' => $headers['tested_wp'],
+        'version' => $version,
+        'requires_wp' => header_value($text, 'Requires at least'),
+        'requires_php' => header_value($text, 'Requires PHP'),
     ];
+}
+
+function optional_env(string $name): string
+{
+    $value = getenv($name);
+    if (!is_string($value)) {
+        return '';
+    }
+
+    return $value;
+}
+
+function version_field(string $input, ?string $fallback, string $name, string $hint): string
+{
+    $value = trim($input);
+    if ($value === '') {
+        $value = $fallback === null ? '' : trim($fallback);
+    }
+    if ($value === '') {
+        fwrite(STDERR, "missing {$name} before upload ({$hint})\n");
+        exit(1);
+    }
+    if (preg_match('/^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/', $value) !== 1) {
+        fwrite(STDERR, "{$name} is not a version: {$value}\n");
+        exit(1);
+    }
+
+    return $value;
+}
+
+function readme_tested_wp(string $source): ?string
+{
+    $root = rtrim($source, '/');
+    foreach (['readme.txt', 'README.txt'] as $name) {
+        $path = $root . '/' . $name;
+        if (!is_file($path)) {
+            continue;
+        }
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            continue;
+        }
+        $text = (string) fread($handle, 8192);
+        fclose($handle);
+        $value = header_value($text, 'Tested up to');
+        if ($value !== null && $value !== '') {
+            return $value;
+        }
+    }
+
+    return null;
+}
+
+function changelog_for_version(string $source, string $version, string $input): string
+{
+    if (trim($input) !== '') {
+        $changelog = trim($input);
+    } else {
+        $changelog = changelog_from_files($source, $version);
+    }
+    if ($changelog === null || $changelog === '') {
+        fwrite(STDERR, "missing changelog for {$version} before upload (set the changelog input, or add a CHANGELOG.md or readme.txt section for that version)\n");
+        exit(1);
+    }
+    if (strlen($changelog) > 100000) {
+        fwrite(STDERR, "changelog for {$version} is longer than 100000 bytes\n");
+        exit(1);
+    }
+
+    return $changelog;
+}
+
+function changelog_from_files(string $source, string $version): ?string
+{
+    $root = rtrim($source, '/');
+    foreach (['CHANGELOG.md', 'CHANGELOG.txt'] as $name) {
+        $section = section_from_file($root . '/' . $name, $version, 'markdown');
+        if ($section !== null) {
+            return $section;
+        }
+    }
+    foreach (['readme.txt', 'README.txt'] as $name) {
+        $section = section_from_file($root . '/' . $name, $version, 'readme');
+        if ($section !== null) {
+            return $section;
+        }
+    }
+
+    return null;
+}
+
+function section_from_file(string $path, string $version, string $kind): ?string
+{
+    if (!is_file($path)) {
+        return null;
+    }
+    $text = (string) file_get_contents($path);
+    if ($kind === 'readme') {
+        return readme_changelog_section($text, $version);
+    }
+
+    return markdown_changelog_section($text, $version);
+}
+
+function markdown_changelog_section(string $text, string $version): ?string
+{
+    $lines = preg_split("/\r\n|\n|\r/", $text);
+    if (!is_array($lines)) {
+        return null;
+    }
+    $start = null;
+    $level = 0;
+    foreach ($lines as $index => $line) {
+        if (preg_match('/^(#{1,6})\s+(.*?)\s*#*$/', $line, $match) !== 1) {
+            continue;
+        }
+        if (!heading_is_version($match[2], $version)) {
+            continue;
+        }
+        $start = $index + 1;
+        $level = strlen($match[1]);
+        break;
+    }
+    if ($start === null) {
+        return null;
+    }
+    $body = [];
+    $count = count($lines);
+    for ($index = $start; $index < $count; $index++) {
+        if (preg_match('/^(#{1,6})\s+/', $lines[$index], $match) === 1 && strlen($match[1]) <= $level) {
+            break;
+        }
+        $body[] = $lines[$index];
+    }
+    $section = trim(implode("\n", $body));
+
+    return $section === '' ? null : $section;
+}
+
+function readme_changelog_section(string $text, string $version): ?string
+{
+    $quoted = preg_quote($version, '/');
+    $pattern = '/^=[ \t]*v?' . $quoted . '[ \t]*=[ \t]*$/m';
+    if (preg_match($pattern, $text, $match, PREG_OFFSET_CAPTURE) !== 1) {
+        return null;
+    }
+    $start = (int) $match[0][1] + strlen((string) $match[0][0]);
+    $rest = substr($text, $start);
+    if (preg_match('/\R={1,2}[ \t]*[^=\r\n].*$/m', $rest, $end, PREG_OFFSET_CAPTURE) === 1) {
+        $rest = substr($rest, 0, (int) $end[0][1]);
+    }
+    $section = trim(str_replace("\r\n", "\n", $rest));
+
+    return $section === '' ? null : $section;
+}
+
+function heading_is_version(string $text, string $version): bool
+{
+    $quoted = preg_quote($version, '/');
+
+    return preg_match('/^\[?v?' . $quoted . '\]?(?:\s+[-–—].*)?$/', trim($text)) === 1;
 }
 
 function header_value(string $text, string $name): ?string
@@ -198,7 +361,7 @@ function header_value(string $text, string $name): ?string
 }
 
 /**
- * @param array{version: string, requires_wp: string, requires_php: string, tested_wp: string} $headers
+ * @param array{version: string, requires_wp: ?string, requires_php: ?string} $headers
  */
 function assert_version(array $headers, string $version): void
 {

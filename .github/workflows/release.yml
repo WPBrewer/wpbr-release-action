@@ -39,6 +39,26 @@ on:
         required: false
         type: boolean
         default: false
+      changelog:
+        description: Changelog for this version. Empty uses the CHANGELOG.md or readme.txt section.
+        required: false
+        type: string
+        default: ""
+      requires-wp:
+        description: requires_wp override. Empty uses the plugin header Requires at least.
+        required: false
+        type: string
+        default: ""
+      requires-php:
+        description: requires_php override. Empty uses the plugin header Requires PHP.
+        required: false
+        type: string
+        default: ""
+      tested-wp:
+        description: tested_wp override. Empty uses readme.txt Tested up to.
+        required: false
+        type: string
+        default: ""
     secrets:
       WPBR_RELEASE_USER:
         description: WordPress user that owns the application password.
@@ -79,6 +99,10 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           SKIP_GITHUB_RELEASE: ${{ inputs.skip-github-release }}
           USE_STUB: ${{ inputs.use-stub }}
+          WPBR_CHANGELOG: ${{ inputs.changelog }}
+          WPBR_REQUIRES_WP: ${{ inputs.requires-wp }}
+          WPBR_REQUIRES_PHP: ${{ inputs.requires-php }}
+          WPBR_TESTED_WP: ${{ inputs.tested-wp }}
           WPBR_RELEASE_USER: ${{ secrets.WPBR_RELEASE_USER }}
           WPBR_RELEASE_APP_PASSWORD: ${{ secrets.WPBR_RELEASE_APP_PASSWORD }}
           WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}

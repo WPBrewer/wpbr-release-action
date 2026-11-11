@@ -16,7 +16,7 @@ if (!is_array($state) || !is_array($result)) {
     fwrite(STDERR, "artifact JSON is invalid\n");
     exit(1);
 }
-if (($result['status'] ?? '') !== 'draft' || ($result['http_status'] ?? 0) !== 201) {
+if (($result['status'] ?? '') !== 'draft' || ($result['http_status'] ?? 0) !== 200) {
     fwrite(STDERR, "workflow result was not a draft create\n");
     exit(1);
 }

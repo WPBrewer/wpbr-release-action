@@ -3,10 +3,14 @@
 /**
  * Local stand-in for wpbr-license/v1 /releases and /update-info.
  *
- * Speaks the da084ce JSON schemas under schema/. Always creates a draft.
- * A product version that was accepted once returns 409 forever.
- * Drafts are not offered by update-info. POST /releases/{id}/publish is a
- * test stand-in for the admin Publish button and is not called by the workflow.
+ * Speaks the da084ce JSON schemas under schema/. POST /releases is multipart
+ * parts `metadata` (application/json) and `zip` only. A create returns HTTP 200
+ * and status draft. A product version that was accepted once returns 409 forever.
+ * Drafts are not offered by update-info.
+ *
+ * TEST ONLY: POST /releases/{id}/publish stands in for the WPBR releases screen
+ * (an admin POST with a nonce). It is not a REST route on the real server.
+ * The workflow never calls it. The response sets X-WPBR-Test-Only: publish-stand-in.
  *
  * @license GPL-3.0-or-later
  */
@@ -42,10 +46,12 @@ function handle_request(): void
     $status = 500;
     $body = '';
     $contentType = 'application/json';
+    $testOnlyPublish = false;
 
     if ($method === 'POST' && $path === '/wp-json/wpbr-license/v1/releases') {
         [$status, $body] = create_release($state);
     } elseif ($method === 'POST' && preg_match('#^/wp-json/wpbr-license/v1/releases/([1-9][0-9]*)/publish$#', $path, $match) === 1) {
+        $testOnlyPublish = true;
         [$status, $body] = publish_release($state, (int) $match[1]);
     } elseif ($method === 'POST' && $path === '/wp-json/wpbr-license/v1/update-info') {
         [$status, $body] = update_info($state);
@@ -64,6 +70,10 @@ function handle_request(): void
         'status' => $status,
     ];
     save_state($state);
+
+    if ($testOnlyPublish) {
+        header('X-WPBR-Test-Only: publish-stand-in');
+    }
 
     if ($contentType === 'application/zip') {
         $release = release_by_id($state, (int) $match[1]);
@@ -107,6 +117,10 @@ function create_release(array &$state): array
     if (!authorized()) {
         return [401, error_body(401, 'unauthorized', 'Unauthorized.')];
     }
+    $shape = multipart_shape_error();
+    if ($shape !== null) {
+        return $shape;
+    }
     $meta = metadata_json();
     if ($meta === null) {
         return [400, error_body(400, 'invalid_request', 'metadata must be JSON.')];
@@ -136,7 +150,7 @@ function create_release(array &$state): array
     }
     $file = uploaded_zip();
     if ($file === null) {
-        return [400, error_body(400, 'invalid_request', 'file must be a zip.')];
+        return [400, error_body(400, 'invalid_request', 'zip must be a zip file.')];
     }
     $actual = hash_file('sha256', $file);
     if (!is_string($actual) || !hash_equals($meta['sha256'], $actual)) {
@@ -174,10 +188,16 @@ function create_release(array &$state): array
     $state['releases'][] = $release;
     $state['versions'][] = $key;
 
-    return [201, json_encode(public_release($release), JSON_UNESCAPED_SLASHES)];
+    $encoded = json_encode(public_release($release), JSON_UNESCAPED_SLASHES);
+
+    return [200, is_string($encoded) ? $encoded : ''];
 }
 
 /**
+ * TEST ONLY. Not a route on the real server. Publishing there is an admin POST
+ * on the WPBR releases screen, with a nonce. This exists so the self-test can
+ * show that update-info stays empty until that happens.
+ *
  * @param array<string, mixed> $state
  * @return array{0: int, 1: string}
  */
@@ -370,6 +390,42 @@ function release_by_id(array $state, int $id): ?array
 }
 
 /**
+ * @return array{0: int, 1: string}|null
+ */
+function multipart_shape_error(): ?array
+{
+    foreach (array_keys($_FILES) as $key) {
+        if ($key !== 'zip' && $key !== 'metadata') {
+            return [400, error_body(400, 'invalid_request', 'Unexpected multipart part.')];
+        }
+    }
+    foreach (array_keys($_POST) as $key) {
+        if ($key !== 'metadata') {
+            return [400, error_body(400, 'invalid_request', 'Loose form fields are not accepted.')];
+        }
+    }
+    $metaFile = isset($_FILES['metadata']);
+    $metaField = array_key_exists('metadata', $_POST);
+    if ($metaFile && $metaField) {
+        return [400, error_body(400, 'invalid_request', 'metadata part is duplicated.')];
+    }
+    if (!$metaFile && !$metaField) {
+        return [400, error_body(400, 'invalid_request', 'Multipart is missing the metadata part.')];
+    }
+    if (!isset($_FILES['zip'])) {
+        return [400, error_body(400, 'invalid_request', 'Multipart is missing the zip part.')];
+    }
+    if ($metaFile) {
+        $type = isset($_FILES['metadata']['type']) ? (string) $_FILES['metadata']['type'] : '';
+        if (stripos($type, 'application/json') !== 0) {
+            return [400, error_body(400, 'invalid_request', 'metadata part must be application/json.')];
+        }
+    }
+
+    return null;
+}
+
+/**
  * @return array<string, mixed>|null
  */
 function metadata_json(): ?array
@@ -387,19 +443,24 @@ function metadata_json(): ?array
     if (!is_array($decoded)) {
         return null;
     }
+    foreach (array_keys($decoded) as $key) {
+        if (!is_string($key)) {
+            return null;
+        }
+    }
 
     return $decoded;
 }
 
 function uploaded_zip(): ?string
 {
-    if (!isset($_FILES['file']['tmp_name'], $_FILES['file']['error'])) {
+    if (!isset($_FILES['zip']['tmp_name'], $_FILES['zip']['error'])) {
         return null;
     }
-    if ((int) $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+    if ((int) $_FILES['zip']['error'] !== UPLOAD_ERR_OK) {
         return null;
     }
-    $tmp = $_FILES['file']['tmp_name'];
+    $tmp = $_FILES['zip']['tmp_name'];
     if (!is_string($tmp) || !is_file($tmp)) {
         return null;
     }

@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://wpbrewer.com/schema/wpbr-license/v1/releases.request.json",
     "title": "POST /releases metadata",
-    "description": "JSON metadata sent with the zip. The multipart part name is metadata.",
+    "description": "JSON body of the multipart metadata part (Content-Type application/json). The zip is a separate part named zip. Loose form fields are not this object.",
     "type": "object",
     "additionalProperties": false,
     "required": ["product_slug", "version", "changelog", "requires_wp", "requires_php", "tested_wp", "sha256"],

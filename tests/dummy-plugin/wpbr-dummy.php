@@ -6,7 +6,7 @@
  * Version: 1.2.3
  * Requires at least: 6.5
  * Requires PHP: 7.4
- * Tested up to: 6.7
+ * Tested up to: 6.6
  * License: GPL-3.0-or-later
  * Text Domain: wpbr-dummy
  *

@@ -74,8 +74,12 @@ fi
 assert_phases "${phase_file}" php-lint tests lint version composer zip upload
 sha="$(php tests/stub-call.php sha "${ROOT}/build/wpbr-dummy-1.2.3.zip")"
 php tests/stub-call.php expect-draft "${sha}" wpbr-dummy
+php tests/stub-call.php expect-stored '{"changelog":"- Self-test fixture.","requires_wp":"6.5","requires_php":"7.4","tested_wp":"6.7"}'
 php tests/stub-call.php reject-unauthorized
 php tests/stub-call.php reject-bad-sha wpbr-dummy "${ROOT}/build/wpbr-dummy-1.2.3.zip"
+php tests/stub-call.php reject-unknown-field wpbr-dummy "${ROOT}/build/wpbr-dummy-1.2.3.zip"
+php tests/stub-call.php reject-wrong-part wpbr-dummy "${ROOT}/build/wpbr-dummy-1.2.3.zip"
+php tests/stub-call.php reject-loose-fields wpbr-dummy "${ROOT}/build/wpbr-dummy-1.2.3.zip"
 php tests/stub-call.php publish-and-expect "${sha}" wpbr-dummy
 
 work="$(mktemp -d)"
@@ -95,6 +99,28 @@ if ! grep -R -F -q "namespace WpbrDummy\\" "${work}/wpbr-dummy/vendor-prefixed";
   exit 1
 fi
 echo "zip respects .distignore and includes the Strauss prefix"
+
+override="$(mktemp)"
+WPBR_CHANGELOG='From input.' \
+WPBR_REQUIRES_WP=6.4 \
+WPBR_REQUIRES_PHP=8.2 \
+WPBR_TESTED_WP=6.9 \
+  php scripts/package.php metadata \
+    --source "${ROOT}/tests/dummy-plugin" \
+    --slug wpbr-dummy \
+    --version 1.2.3 \
+    --zip "${ROOT}/build/wpbr-dummy-1.2.3.zip" \
+    --out "${override}"
+php tests/stub-call.php expect-metadata-file "${override}" '{"changelog":"From input.","requires_wp":"6.4","requires_php":"8.2","tested_wp":"6.9"}'
+readme_meta="$(mktemp)"
+php scripts/package.php metadata \
+  --source "${ROOT}/tests/fixtures/readme-changelog" \
+  --slug wpbr-readme \
+  --version 1.2.3 \
+  --zip "${ROOT}/build/wpbr-dummy-1.2.3.zip" \
+  --out "${readme_meta}"
+php tests/stub-call.php expect-metadata-file "${readme_meta}" '{"changelog":"* Readme changelog.","requires_wp":"6.5","requires_php":"7.4","tested_wp":"6.8"}'
+echo "metadata came from the changelog section, readme Tested up to, and inputs"
 
 echo "CASE version-mismatch"
 php tests/stub-call.php reset
@@ -165,5 +191,30 @@ if [[ "$(php tests/stub-call.php stored-sha)" != "${first_sha}" ]]; then
   exit 1
 fi
 echo "reused version returned 409 and stayed unpublished"
+
+echo "CASE missing-changelog"
+php tests/stub-call.php reset
+phase_file="$(mktemp)"
+err="$(mktemp)"
+export SLUG="wpbr-missing"
+export PACKAGE_DIRECTORY="tests/fixtures/missing-changelog"
+export TEST_COMMAND="php tests/run.php"
+export LINT_COMMAND="php tests/lint.php"
+set +e
+WPBR_PHASE_FILE="${phase_file}" bash "${ROOT}/scripts/release.sh" >"${err}" 2>&1
+code=$?
+set -e
+cat "${err}"
+if [[ "${code}" -eq 0 ]]; then
+  echo "missing changelog was uploaded" >&2
+  exit 1
+fi
+assert_phases "${phase_file}" php-lint tests lint version
+php tests/stub-call.php expect-no-upload
+if ! grep -q 'missing changelog for 1.2.3 before upload' "${err}"; then
+  echo "missing changelog did not fail with the metadata error" >&2
+  exit 1
+fi
+echo "missing changelog failed before upload"
 
 echo "SELF-TEST OK sha256=${first_sha}"
