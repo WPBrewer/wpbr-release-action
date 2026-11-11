@@ -12,5 +12,15 @@ https://wpbrewer.com/schema/wpbr-license/v1/.
 POST /releases behavior follows the da084ce api-v1.md text: HTTP Basic
 application password, multipart parts metadata (application/json) and zip,
 HTTP 200 with status draft, HTTP 409 invalid_request when the version was
-used before. Publishing is not a REST route. The stub's
+used before (including after a yank or a delete, and including an identical
+sha256). Publishing is not a REST route. The stub's
 POST /releases/{id}/publish route is a test-only stand-in.
+
+POST /releases/{id}/yank and the update-info offer rules (yanked rows are
+never packaged; the previous published release is offered with
+allow_downgrade when it is older; pinned_version caps the offer; an invalid
+pin offers nothing; expired is 403 license_expired; revoked is 200 with no
+package) follow that same api-v1.md text. They are not separate schema files
+in the da084ce snapshot. The stub's logged-in-session auth is not implemented;
+the workflow sends the application password. A user without
+manage_wpbr_releases is the fixture wpbr-nocap.

@@ -1,10 +1,10 @@
 # wpbr-release-action
 
-Reusable GitHub Actions workflow that builds a WordPress plugin zip and uploads it to the WPBrewer license server as a **draft**.
+Reusable GitHub Actions workflows that build a WordPress plugin zip, upload it to the WPBrewer license server as a **draft**, and yank a published release.
 
-Version **0.1.0**. This repository is not tagged yet. Callers should pin the commit SHA until `v0.1.0` exists. GPL-3.0-or-later for these files. The `LICENSE` file is the GPL-3.0 text.
+Version **0.2.0**. This repository is not tagged yet. Callers should pin the commit SHA until `v0.2.0` exists. GPL-3.0-or-later for these files. The `LICENSE` file is the GPL-3.0 text.
 
-Customers are not offered the zip until someone clicks **Publish** in the license server admin. The workflow never publishes.
+Customers are not offered the zip until someone clicks **Publish** on the WPBR releases screen. The release workflow never publishes. Yanking a published release offers the previous published version with `allow_downgrade`. The full captain flow (release, publish, yank, roll back, pin, secrets, and errors) is in [docs/release.md](docs/release.md).
 
 ## Caller
 
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   release:
-    uses: WPBrewer/wpbr-release-action/.github/workflows/release.yml@v0.1.0
+    uses: WPBrewer/wpbr-release-action/.github/workflows/release.yml@v0.2.0
     with:
       slug: wpbr-example
       php-version: "8.3"
@@ -33,14 +33,48 @@ jobs:
       WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}
 ```
 
-Until the `v0.1.0` tag exists, replace `@v0.1.0` with the merge commit SHA.
+Until the `v0.2.0` tag exists, replace `@v0.2.0` with the merge commit SHA.
+
+### Yank
+
+```yaml
+name: Yank release
+on:
+  workflow_dispatch:
+    inputs:
+      release-id:
+        description: Numeric release id.
+        required: true
+        type: string
+      reason:
+        description: Optional. Not shown to customers.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  yank:
+    uses: WPBrewer/wpbr-release-action/.github/workflows/yank.yml@v0.2.0
+    with:
+      release-id: ${{ inputs.release-id }}
+      reason: ${{ inputs.reason }}
+    secrets:
+      WPBR_RELEASE_USER: ${{ secrets.WPBR_RELEASE_USER }}
+      WPBR_RELEASE_APP_PASSWORD: ${{ secrets.WPBR_RELEASE_APP_PASSWORD }}
+      WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}
+```
+
+`release-id` is the numeric id. There is no slug+version lookup. Read `draft id=` from the release log, or the numeric id on the WPBR releases screen. A draft yank is 409. Yank the published release again and the response is still 200 `yanked`. See [docs/release.md](docs/release.md).
 
 ### Secrets (in the plugin repository, not here)
 
 | Secret | Value |
 | --- | --- |
 | `WPBR_RELEASE_USER` | WordPress login that owns the application password |
-| `WPBR_RELEASE_APP_PASSWORD` | Application password for a user who can `manage_wpbr_releases` |
+| `WPBR_RELEASE_APP_PASSWORD` | Application password for a user who can `manage_wpbr_releases`. `manage_options` is not that capability. Customer tokens are rejected. |
 | `WPBR_SERVER_URL` | Server origin only, for example `https://licenses.example.com` |
 
 The workflow masks all three. It does not print them. Do not put them in this public repository.
@@ -76,10 +110,11 @@ If step 7 created a GitHub Release and step 8 then failed, the server did not co
 
 ## Self-test
 
-`tests/self-test.sh` runs the same `scripts/release.sh` the workflow runs, against `tests/stub-server`. The stub implements the da084ce `/releases` and `/update-info` behavior described in `tests/stub-server/schema/`. It is not the production license server. Its Basic-auth password is a fixture (`stub-only-not-a-secret`) and is not a credential.
+`tests/self-test.sh` runs `scripts/release.sh` and `scripts/yank.sh` against `tests/stub-server`. The stub implements the da084ce `/releases`, `/releases/{id}/yank`, and `/update-info` behavior described in `tests/stub-server/schema/`. It is not the production license server. Its Basic-auth password is a fixture (`stub-only-not-a-secret`) and is not a credential. `tests/wp-e2e.sh` installs WordPress, requires `wpbrewer/wpbr-updater` 1.0.0 from Composer, and checks that a yank offers the previous version and that the upgrader installs it.
 
 ```bash
 bash tests/self-test.sh
+bash tests/wp-e2e.sh
 ```
 
-Needs PHP (curl, mbstring, zip), Composer, unzip, and `curl`.
+Needs PHP (curl, mbstring, zip, mysqli), Composer, unzip, `curl`, and MariaDB for the WordPress run (`WP_DB_HOST`, `WP_DB_NAME`, `WP_DB_USER`, `WP_DB_PASS`; defaults `127.0.0.1` / `wpbr_e2e` / `wp` / `wp`).

@@ -27,7 +27,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: shellcheck
-        run: shellcheck scripts/release.sh tests/self-test.sh
+        run: shellcheck scripts/release.sh scripts/yank.sh tests/self-test.sh tests/wp-e2e.sh
 
       - name: actionlint
         run: |
@@ -105,3 +105,75 @@ jobs:
 
       - name: Check draft sha256
         run: php tests/verify-result.php verify/stub-state.json verify/build/result.json
+
+  call-yank:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/yank.yml
+    with:
+      release-id: "1"
+      reason: "self-test"
+      use-stub: true
+    secrets:
+      WPBR_RELEASE_USER: ${{ secrets.WPBR_RELEASE_USER }}
+      WPBR_RELEASE_APP_PASSWORD: ${{ secrets.WPBR_RELEASE_APP_PASSWORD }}
+      WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}
+
+  verify-yank:
+    needs: call-yank
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Download stub evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stub-yank
+          path: verify
+
+      - name: Check yank
+        run: php tests/verify-yank.php verify/stub-state.json verify/build/yank-result.json
+
+  wordpress:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          coverage: none
+          extensions: curl, mbstring, zip, mysqli
+          tools: composer
+
+      - name: MariaDB
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server
+          sudo service mariadb start
+          sudo mysql -e "CREATE DATABASE IF NOT EXISTS wpbr_e2e; CREATE USER IF NOT EXISTS 'wp'@'127.0.0.1' IDENTIFIED BY 'wp'; CREATE USER IF NOT EXISTS 'wp'@'localhost' IDENTIFIED BY 'wp'; GRANT ALL ON wpbr_e2e.* TO 'wp'@'127.0.0.1'; GRANT ALL ON wpbr_e2e.* TO 'wp'@'localhost'; FLUSH PRIVILEGES;"
+
+      - name: WordPress yank rollback
+        env:
+          WP_DB_HOST: 127.0.0.1
+          WP_DB_NAME: wpbr_e2e
+          WP_DB_USER: wp
+          WP_DB_PASS: wp
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash tests/wp-e2e.sh
