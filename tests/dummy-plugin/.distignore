@@ -1,0 +1,11 @@
+# Gitignore-style. Last match wins.
+/.git
+/.github
+/tests/
+/packages/
+/vendor/
+/composer.json
+/composer.lock
+/.distignore
+*.txt
+!/keep-me.txt

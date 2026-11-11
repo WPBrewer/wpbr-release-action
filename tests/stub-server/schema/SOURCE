@@ -1,0 +1,16 @@
+Vendored JSON Schemas for wpbr-license/v1, used by the self-test stub.
+
+Source repository: WPBrewer/wpbr-license-server (private)
+Source commit: da084ce
+Source path: contract/schema/
+Copied from the public snapshot in WPBrewer/wpbr-updater tests/contract/schema
+(that snapshot's SOURCE file: "Snapshot taken 2026-11-11 from the archive attached to WPB-369").
+
+The schemas are what the stub implements. $id and $ref use
+https://wpbrewer.com/schema/wpbr-license/v1/.
+
+POST /releases behavior follows the da084ce api-v1.md text: HTTP Basic
+application password, multipart parts metadata (application/json) and zip,
+HTTP 200 with status draft, HTTP 409 invalid_request when the version was
+used before. Publishing is not a REST route. The stub's
+POST /releases/{id}/publish route is a test-only stand-in.

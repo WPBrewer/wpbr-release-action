@@ -1,0 +1,6 @@
+/build/
+/stub-state.json
+/stub-storage/
+/stub-server.log
+/tests/dummy-plugin/vendor/
+/tests/dummy-plugin/vendor-prefixed/

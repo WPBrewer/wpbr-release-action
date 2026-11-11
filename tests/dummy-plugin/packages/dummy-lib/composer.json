@@ -1,0 +1,14 @@
+{
+    "name": "wpbr/dummy-lib",
+    "description": "Path package prefixed by Strauss during the release self-test.",
+    "license": "GPL-3.0-or-later",
+    "version": "1.0.0",
+    "require": {
+        "php": ">=7.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "WpbrDummyLib\\": "src/"
+        }
+    }
+}
