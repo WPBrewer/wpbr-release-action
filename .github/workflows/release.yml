@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      slug:
+        description: Plugin slug. Must match the main file {slug}.php and the zip name.
+        required: true
+        type: string
+      php-version:
+        description: PHP version used to lint, test, and build.
+        required: true
+        type: string
+      test-command:
+        description: Command run in the package directory before the build. Non-zero fails the release.
+        required: true
+        type: string
+      lint-command:
+        description: Command run in the package directory after tests and before the build.
+        required: true
+        type: string
+      package-directory:
+        description: Plugin root, relative to the repository root.
+        required: false
+        type: string
+        default: .
+      version:
+        description: vX.Y.Z override. Leave empty on a tag push so the tag is the version.
+        required: false
+        type: string
+        default: ""
+      skip-github-release:
+        description: Skip creating the GitHub Release. The license-server draft upload still runs.
+        required: false
+        type: boolean
+        default: false
+      use-stub:
+        description: Upload to the in-repo contract stub. Self-test only. Ignores the release secrets.
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      WPBR_RELEASE_USER:
+        description: WordPress user that owns the application password.
+        required: false
+      WPBR_RELEASE_APP_PASSWORD:
+        description: WordPress application password with manage_wpbr_releases.
+        required: false
+      WPBR_SERVER_URL:
+        description: License server origin, no path. Example https://licenses.example.com
+        required: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ inputs.php-version }}
+          coverage: none
+          extensions: curl, mbstring, zip
+          tools: composer
+
+      - name: Build and upload draft
+        env:
+          SLUG: ${{ inputs.slug }}
+          TEST_COMMAND: ${{ inputs.test-command }}
+          LINT_COMMAND: ${{ inputs.lint-command }}
+          PACKAGE_DIRECTORY: ${{ inputs.package-directory }}
+          INPUT_VERSION: ${{ inputs.version }}
+          SKIP_GITHUB_RELEASE: ${{ inputs.skip-github-release }}
+          USE_STUB: ${{ inputs.use-stub }}
+          WPBR_RELEASE_USER: ${{ secrets.WPBR_RELEASE_USER }}
+          WPBR_RELEASE_APP_PASSWORD: ${{ secrets.WPBR_RELEASE_APP_PASSWORD }}
+          WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+        run: bash scripts/release.sh
+
+      - name: Upload stub evidence
+        if: always() && inputs.use-stub
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stub-draft
+          path: |
+            stub-state.json
+            build/result.json
+          if-no-files-found: error

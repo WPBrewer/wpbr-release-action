@@ -1,0 +1,107 @@
+name: Self-test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  static:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          coverage: none
+          extensions: curl, mbstring, zip
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: shellcheck
+        run: shellcheck scripts/release.sh tests/self-test.sh
+
+      - name: actionlint
+        run: |
+          curl -fsSL -o /tmp/actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -color
+
+      - name: php -l
+        run: find . -name '*.php' -not -path './tests/dummy-plugin/vendor/*' -not -path './tests/dummy-plugin/vendor-prefixed/*' -print0 | xargs -0 -n1 php -l
+
+  cases:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          coverage: none
+          extensions: curl, mbstring, zip
+          tools: composer
+
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Contract cases
+        run: bash tests/self-test.sh
+
+  call-happy:
+    permissions:
+      contents: write
+      actions: write
+    uses: ./.github/workflows/release.yml
+    with:
+      slug: wpbr-dummy
+      php-version: "8.3"
+      package-directory: tests/dummy-plugin
+      version: v1.2.3
+      test-command: php tests/run.php
+      lint-command: php tests/lint.php
+      skip-github-release: true
+      use-stub: true
+    secrets:
+      WPBR_RELEASE_USER: ${{ secrets.WPBR_RELEASE_USER }}
+      WPBR_RELEASE_APP_PASSWORD: ${{ secrets.WPBR_RELEASE_APP_PASSWORD }}
+      WPBR_SERVER_URL: ${{ secrets.WPBR_SERVER_URL }}
+
+  verify-happy:
+    needs: call-happy
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Download stub evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stub-draft
+          path: verify
+
+      - name: Check draft sha256
+        run: php tests/verify-result.php verify/stub-state.json verify/build/result.json

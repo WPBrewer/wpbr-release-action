@@ -1,0 +1,39 @@
+{
+    "name": "wpbr/dummy-plugin",
+    "description": "Fixture plugin for the wpbr-release-action self-test.",
+    "license": "GPL-3.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "wpbr/dummy-lib": "1.0.0"
+    },
+    "require-dev": {
+        "brianhenryie/strauss": "0.31.1"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "packages/dummy-lib",
+            "options": {
+                "symlink": false
+            }
+        }
+    ],
+    "config": {
+        "allow-plugins": {
+            "brianhenryie/strauss": true
+        },
+        "sort-packages": true
+    },
+    "extra": {
+        "strauss": {
+            "target_directory": "vendor-prefixed",
+            "namespace_prefix": "WpbrDummy\\",
+            "classmap_prefix": "WpbrDummy_",
+            "packages": [
+                "wpbr/dummy-lib"
+            ],
+            "delete_vendor_packages": true
+        }
+    },
+    "minimum-stability": "stable"
+}
